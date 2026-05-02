@@ -1,4 +1,4 @@
-use libc::{EV_ADD, EV_ENABLE, EVFILT_READ, kevent, kqueue};
+use libc::{EV_ADD, EV_ENABLE, EVFILT_READ, kevent, kqueue, timespec};
 use std::{
     collections::HashSet,
     io::{self},
@@ -11,6 +11,9 @@ pub struct kqueue_wrapper {
 }
 
 impl kqueue_wrapper {
+    fn os_err(code: i32) -> std::io::Error {
+        io::Error::from_raw_os_error(-code.abs())
+    }
     pub fn new() -> Result<Self, std::io::Error> {
         unsafe {
             match kqueue() {
@@ -18,12 +21,30 @@ impl kqueue_wrapper {
                     listeners: Default::default(),
                     fd: x,
                 }),
-                x => Err(io::Error::from_raw_os_error(-x)),
+                x => Err(kqueue_wrapper::os_err(-x)),
             }
         }
     }
 
-    pub fn listen_to(&mut self, file_descriptors: &[usize]) -> Result<(), std::io::Error> {
+    pub fn listen_to(&mut self, events: &mut [kevent]) -> Result<(), std::io::Error> {
+        unsafe {
+            let res = kevent(
+                self.fd,
+                events.as_mut_ptr(),
+                events.len() as i32,
+                null_mut(),
+                0,
+                null(),
+            );
+            if res > 0 {
+                Ok(())
+            } else {
+                Err(kqueue_wrapper::os_err(-res))
+            }
+        }
+    }
+
+    pub fn listen_to_fd(&mut self, file_descriptors: &[usize]) -> Result<(), std::io::Error> {
         let mut events = Vec::new();
         for fd in file_descriptors {
             events.push(kevent {
@@ -36,17 +57,34 @@ impl kqueue_wrapper {
             });
         }
 
+        self.listen_to(events.as_mut_slice())
+    }
+
+    pub fn wait(
+        &mut self,
+        event_buffer: &mut [kevent],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<usize, std::io::Error> {
         unsafe {
-            match kevent(
+            let timeout = match timeout {
+                Some(dur) => &timespec {
+                    tv_sec: dur.as_secs() as libc::time_t,
+                    tv_nsec: dur.subsec_nanos() as i64,
+                },
+                None => null(),
+            };
+            let result = kevent(
                 self.fd,
-                events.as_mut_ptr(),
-                events.len() as i32,
                 null_mut(),
                 0,
-                null(),
-            ) {
-                x if x > 0 => Ok(()),
-                x => Err(io::Error::from_raw_os_error(-x)),
+                event_buffer.as_mut_ptr(),
+                event_buffer.len() as i32,
+                timeout,
+            );
+            if result > 0 {
+                Ok(result as usize)
+            } else {
+                Err(kqueue_wrapper::os_err(result))
             }
         }
     }
