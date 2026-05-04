@@ -1,7 +1,8 @@
-use libc::{EV_ADD, EV_ENABLE, EVFILT_READ, kevent, kqueue, timespec};
+use libc::{EV_ADD, EV_ENABLE, EV_ONESHOT, EVFILT_READ, kevent, kqueue, timespec};
 use std::{
     collections::HashSet,
     io::{self},
+    iter::Filter,
     ptr::{null, null_mut},
 };
 
@@ -9,7 +10,26 @@ pub struct kqueue_wrapper {
     listeners: HashSet<u32>,
     fd: i32,
 }
+#[derive(Clone, Copy)]
+pub enum FilterType {
+    EvfiltRead = -1,
+    EvfiltWrite = -2,
+    EvfiltAio = -3,
+    EvfiltVnode = -4,
+    EvfiltProc = -5,
+    EvfiltSignal = -6,
+    EvfiltTimer = -7,
+    EvfiltMachport = -8,
+    EvfiltFs = -9,
+    EvfiltUser = -10,
+    EvfiltVm = -12,
+}
 
+impl Into<i16> for FilterType {
+    fn into(self) -> i16 {
+        self as i16
+    }
+}
 impl kqueue_wrapper {
     fn os_err(code: i32) -> std::io::Error {
         io::Error::from_raw_os_error(-code.abs())
@@ -44,13 +64,16 @@ impl kqueue_wrapper {
         }
     }
 
-    pub fn listen_to_fd(&mut self, file_descriptors: &[usize]) -> Result<(), std::io::Error> {
+    pub fn listen_to_fd_one_shot(
+        &mut self,
+        file_descriptors: &[(usize, FilterType)],
+    ) -> Result<(), std::io::Error> {
         let mut events = Vec::new();
-        for fd in file_descriptors {
+        for (fd, filter_type) in file_descriptors {
             events.push(kevent {
                 ident: *fd,
-                filter: EVFILT_READ,
-                flags: EV_ADD | EV_ENABLE,
+                filter: (*filter_type).into(),
+                flags: EV_ADD | EV_ONESHOT,
                 data: 0,
                 udata: null_mut(),
                 fflags: 0,
@@ -61,7 +84,7 @@ impl kqueue_wrapper {
     }
 
     pub fn wait(
-        &mut self,
+        &self,
         event_buffer: &mut [kevent],
         timeout: Option<std::time::Duration>,
     ) -> Result<usize, std::io::Error> {
